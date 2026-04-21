@@ -1,16 +1,9 @@
 {
-  // ==================================================
-  // Search Configuration
-  // ==================================================
   "search_settings": {
-    "search_days": 14,
-    "max_results": 100,
+    "search_days": 3,
+    "max_results": 30,
     "max_results_per_source": {}
   },
-
-  // ==================================================
-  // Data Source Configuration
-  // ==================================================
   "data_sources": {
     "enabled": [
       "arxiv"
@@ -21,32 +14,31 @@
       "fetch_timeout_seconds": 180
     }
   },
-
-  // ==================================================
-  // Run Lock Configuration
-  // ==================================================
   "run_lock": {
     "max_age_hours": 12
   },
-
-  // ==================================================
-  // ArXiv Target Domain Configuration
-  // ==================================================
   "target_domains": {
     "domains": [
-      "quant-ph"
+      "cs.CR",
+      "cs.AR",
+      "cs.ET"
     ]
   },
-
-  // ==================================================
-  // Keyword Configuration
-  // ==================================================
   "keywords": {
     "primary_keywords": {
       "weight": 1.0,
-      "keywords": []
+      "keywords": [
+        "hardware trojan detection",
+        "side-channel attack",
+        "differential power analysis",
+        "fault injection attack",
+        "secure boot",
+        "trusted execution environment",
+        "physical unclonable function",
+        "supply chain security"
+      ]
     },
-    "enable_reference_extraction": true,
+    "enable_reference_extraction": false,
     "reference_keywords_config": {
       "max_keywords": 10,
       "similarity_threshold": 0.75,
@@ -67,10 +59,6 @@
     },
     "research_context": ""
   },
-
-  // ==================================================
-  // Scoring Configuration
-  // ==================================================
   "scoring_settings": {
     "keyword_relevance_score": {
       "max_score_per_keyword": 10
@@ -86,10 +74,6 @@
     },
     "include_all_in_report": true
   },
-
-  // ==================================================
-  // Path Configuration
-  // ==================================================
   "paths": {
     "data_dir": "data",
     "reference_pdfs": "data/reference_pdfs",
@@ -97,10 +81,6 @@
     "downloaded_pdfs": "data/downloaded_pdfs",
     "history_dir": "data/history"
   },
-
-  // ==================================================
-  // Keyword Trend Tracking Configuration
-  // ==================================================
   "keyword_tracker": {
     "enabled": true,
     "database": {
@@ -126,12 +106,8 @@
       "frequency": "weekly"
     }
   },
-
-  // ==================================================
-  // Notification Configuration
-  // ==================================================
   "notifications": {
-    "enabled": true,
+    "enabled": false,
     "on_success": true,
     "on_failure": true,
     "attach_reports": true,
@@ -157,66 +133,34 @@
       }
     }
   },
-
-  // ==================================================
-  // Retry Configuration
-  // ==================================================
   "retry": {
     "max_attempts": 5,
     "min_wait": 2,
     "max_wait": 60
   },
-
-  // ==================================================
-  // Logging Configuration
-  // ==================================================
   "logging": {
     "rotation_type": "time",
     "keep_days": 30
   },
-
-  // ==================================================
-  // Concurrency Configuration
-  // ==================================================
   "concurrency": {
     "enabled": true,
     "workers": 2
   },
-
-  // ==================================================
-  // PDF Parser Configuration
-  // ==================================================
   "pdf_parser": {
-    "mode": "mineru",
+    "mode": "pymupdf",
     "mineru_model_version": "vlm",
     "poll_interval": 3,
     "poll_timeout": 300
   },
-
-  // ==================================================
-  // Report Configuration
-  // ==================================================
   "report_settings": {
     "enable_html_report": true
   },
-
-  // ==================================================
-  // Auto-update Configuration
-  // ==================================================
   "auto_update": {
     "enabled": true
   },
-
-  // ==================================================
-  // Token Tracking Configuration
-  // ==================================================
   "token_tracking": {
     "enabled": true
   },
-
-  // ==================================================
-  // Trend Research Mode Configuration
-  // ==================================================
   "trend_research": {
     "default_date_range_days": 365,
     "max_results": 500,
