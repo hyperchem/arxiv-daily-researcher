@@ -49,9 +49,9 @@ jobs:
           OPENALEX_EMAIL=${{ secrets.OPENALEX_EMAIL }}
           OPENALEX_API_KEY=${{ secrets.OPENALEX_API_KEY }}
           SEMANTIC_SCHOLAR_API_KEY=${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
-          ENABLE_NOTIFICATIONS=${{ secrets.ENABLE_NOTIFICATIONS }}
+          ENABLE_NOTIFICATIONS=${{ secrets.ENABLE_NOTIFICATIONS || 'false' }}
           SMTP_HOST=${{ secrets.SMTP_HOST }}
-          SMTP_PORT=${{ secrets.SMTP_PORT }}
+          SMTP_PORT=${{ secrets.SMTP_PORT || '587' }}
           SMTP_USER=${{ secrets.SMTP_USER }}
           SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM=${{ secrets.SMTP_FROM }}
