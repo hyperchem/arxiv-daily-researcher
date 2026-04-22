@@ -111,7 +111,7 @@
     }
   },
   "notifications": {
-    "enabled": false,
+    "enabled": true,
     "on_success": true,
     "on_failure": true,
     "attach_reports": true,
@@ -127,7 +127,7 @@
         "enabled": false
       },
       "telegram": {
-        "enabled": false
+        "enabled": true
       },
       "slack": {
         "enabled": false
