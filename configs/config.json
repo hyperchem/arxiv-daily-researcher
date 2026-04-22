@@ -31,11 +31,15 @@
         "hardware trojan detection",
         "side-channel attack",
         "differential power analysis",
-        "fault injection attack",
-        "secure boot",
-        "trusted execution environment",
+        "electromagnetic analysis",
+        "fault injection",
+        "electromagnetic fault injection",
+        "laser fault injection",
+        "differential fault analysis",
         "physical unclonable function",
-        "supply chain security"
+        "logic locking",
+        "hardware obfuscation",
+        "IC camouflaging"
       ]
     },
     "enable_reference_extraction": false,
