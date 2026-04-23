@@ -146,6 +146,8 @@ class TrendResearchPipeline:
         # 打分候选池上限：历史过滤后若仍超过该值，只对前 N 篇（按时间倒序）做 LLM 打分，
         # 用于控制单次运行的 LLM 调用成本。None 表示不做二次截断。
         self.score_pool_size = score_pool_size if (score_pool_size and score_pool_size > 0) else None
+        # 记录最近一次重排序的 paper_id -> score 映射，供通知阶段展示 Top-N 详情
+        self._last_scores: Dict[str, float] = {}
 
     def run(self):
         """执行研究趋势分析完整流程"""
@@ -284,6 +286,22 @@ class TrendResearchPipeline:
 
             # ==================== 阶段5: 发送通知 ====================
             logger.info(">>> 阶段5: 发送通知...")
+
+            # 构建 Top-N 论文摘要：最终入选的论文列表（已在重排序后截断），
+            # 附带本轮打分 + TLDR + 原文链接，方便在 Telegram / 邮件中直接跳转。
+            notification_top_n = self.final_top_n or self.settings.NOTIFICATION_TOP_N
+            top_papers_payload: List[Dict[str, Any]] = []
+            for p in papers[: notification_top_n or len(papers)]:
+                top_papers_payload.append(
+                    {
+                        "title": p.title,
+                        "score": self._last_scores.get(p.paper_id, 0.0),
+                        "source": "arxiv",
+                        "tldr": tldrs.get(p.paper_id, "") if tldrs else "",
+                        "url": getattr(p, "url", "") or "",
+                    }
+                )
+
             self._send_result_notification(
                 total_papers=len(papers),
                 report_paths=report_paths,
@@ -293,6 +311,7 @@ class TrendResearchPipeline:
                 token_usage=(
                     token_counter.get_summary() if settings.TOKEN_TRACKING_ENABLED else None
                 ),
+                top_papers=top_papers_payload,
             )
 
             # ==================== 完成 ====================
@@ -469,6 +488,9 @@ class TrendResearchPipeline:
         for paper, score in merged[:top_n]:
             logger.info(f"    ✓ 相关性 {score:.1f}  {paper.title[:60]}")
 
+        # 保留本次重排序产生的分数，供通知阶段按 paper_id 查找
+        self._last_scores = {p.paper_id: float(s) for p, s in merged[:top_n]}
+
         return [p for p, _ in merged[:top_n]]
 
     # ==================== 通知 ====================
@@ -481,6 +503,7 @@ class TrendResearchPipeline:
         trend_skills_count: int = 0,
         tldr_count: int = 0,
         token_usage: Dict[str, Any] = None,
+        top_papers: Optional[List[Dict[str, Any]]] = None,
     ):
         """发送研究趋势分析结果通知"""
         if not self.settings.ENABLE_NOTIFICATIONS:
@@ -500,6 +523,7 @@ class TrendResearchPipeline:
                 report_paths={k: str(v) for k, v in report_paths.items()},
                 success=success,
                 token_usage=token_usage or {},
+                top_papers=top_papers or [],
             )
 
             notifier = NotifierAgent()

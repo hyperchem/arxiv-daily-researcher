@@ -9,6 +9,7 @@
     {tldr_count}          — TLDR 生成成功数
     {trend_skills_count}  — 趋势分析维度数
     {report_rows_html}    — 报告路径表格行（HTML <tr> 片段）
+    {top_papers_html}     — Top-N 论文卡片（完整 <tr> 片段，无数据时为空字符串）
 
   修改此文件即可自定义研究趋势分析成功邮件通知的样式和内容。
 -->
@@ -103,6 +104,9 @@
               </table>
             </td>
           </tr>
+
+          <!-- Section: Top-N Papers -->
+          {top_papers_html}
 
           <!-- Section: Report Paths -->
           <tr>

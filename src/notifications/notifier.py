@@ -196,6 +196,9 @@ class TrendRunResult:
     success: bool = True
     error_message: Optional[str] = None
     token_usage: Dict[str, Any] = field(default_factory=dict)
+    # 最终入选的 Top-N 论文摘要：每项包含 title/score/source/tldr/url
+    # 供 Telegram / Markdown / HTML 邮件通知展示详细论文列表
+    top_papers: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class BaseNotifier(ABC):
@@ -867,6 +870,27 @@ class NotifierAgent:
                 report_lines.append(f"> `{fmt}` {path}")
         report_list = "\n".join(report_lines)
 
+        # 构建 Top-N 论文文本（与 daily-run 通知保持一致的风格，方便在 Telegram 中直接跳转）
+        top_lines: List[str] = []
+        if result.top_papers:
+            top_lines.append(f"**Top {len(result.top_papers)} 论文**")
+            for i, p in enumerate(result.top_papers, 1):
+                title = p.get("title", "")[:80]
+                score = p.get("score", 0) or 0
+                src = (p.get("source", "") or "").upper() or "ARXIV"
+                tldr = (p.get("tldr") or "")[:120]
+                url = p.get("url", "")
+                top_lines.append(f"> **{i}.** `{src}` {title}")
+                try:
+                    top_lines.append(
+                        f'> <font color="comment">Score: {float(score):.1f} | {tldr}</font>'
+                    )
+                except (TypeError, ValueError):
+                    top_lines.append(f'> <font color="comment">{tldr}</font>')
+                if url:
+                    top_lines.append(f"> [查看原文]({url})")
+        top_papers = "\n".join(top_lines)
+
         if template:
             return _render_template(
                 template,
@@ -878,6 +902,7 @@ class NotifierAgent:
                 tldr_count=result.tldr_count,
                 trend_skills_count=result.trend_skills_count,
                 report_list=report_list,
+                top_papers=top_papers,
                 error_message=result.error_message or "无",
                 token_usage_section=self._format_token_section_md(result.token_usage),
             )
@@ -908,6 +933,23 @@ class NotifierAgent:
             lines.append("Reports:")
             for fmt, path in result.report_paths.items():
                 lines.append(f"  [{fmt}] {path}")
+
+        if result.top_papers:
+            lines.append("")
+            lines.append(f"Top {len(result.top_papers)} Papers:")
+            for i, p in enumerate(result.top_papers, 1):
+                title = p.get("title", "")[:80]
+                score = p.get("score", 0) or 0
+                src = (p.get("source", "") or "").upper() or "ARXIV"
+                tldr = (p.get("tldr") or "")[:120]
+                url = p.get("url", "")
+                lines.append(f"  {i}. [{src}] {title}")
+                try:
+                    lines.append(f"     Score: {float(score):.1f} | {tldr}")
+                except (TypeError, ValueError):
+                    lines.append(f"     {tldr}")
+                if url:
+                    lines.append(f"     {url}")
 
         return "\n".join(lines)
 
@@ -946,6 +988,9 @@ class NotifierAgent:
             )
         )
 
+        # Top-N 论文卡片（复用 daily-run 的构建逻辑，接受任何带 top_papers 属性的对象）
+        top_papers_html = self._build_top_papers_html(result)
+
         return _render_template(
             template,
             timestamp=self._html_escape(result.run_timestamp),
@@ -955,6 +1000,7 @@ class NotifierAgent:
             tldr_count=result.tldr_count,
             trend_skills_count=result.trend_skills_count,
             report_rows_html=report_rows_html,
+            top_papers_html=top_papers_html,
             error_message=self._html_escape(result.error_message or "无"),
             token_usage_html=self._format_token_section_html(result.token_usage),
         )

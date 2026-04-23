@@ -9,6 +9,7 @@
 #   {tldr_count}           — TLDR 生成成功数
 #   {trend_skills_count}   — 趋势分析维度数
 #   {report_list}          — 报告路径列表（已格式化）
+#   {top_papers}           — Top-N 论文清单（含标题/分数/TLDR/链接，已格式化）
 #   {error_message}        — 错误信息（成功时为空）
 #   {token_usage_section}  — Token 消耗统计（已格式化，关闭追踪时为空）
 #
@@ -23,6 +24,8 @@
 
 **分析统计**
 > 搜索论文 <font color="info">**{total_papers}**</font> 篇 | TLDR <font color="info">**{tldr_count}**</font> 篇 | 分析维度 <font color="info">**{trend_skills_count}**</font> 个
+
+{top_papers}
 
 {token_usage_section}
 
