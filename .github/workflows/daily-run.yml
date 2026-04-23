@@ -85,6 +85,15 @@ jobs:
                    data/history data/keywords data/run \
                    data/reference_pdfs data/downloaded_pdfs logs
 
+      - name: Debug runner time
+        run: |
+          echo "=== Time Debug Info ==="
+          echo "UTC now: $(date -u '+%Y-%m-%d %H:%M:%S %Z')"
+          echo "Runner local now: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+          echo "Epoch now: $(date +%s)"
+          echo "TZ env: ${TZ:-<not set>}"
+          echo "======================="
+
       - name: Run research pipeline
         run: python main.py
         env:
