@@ -388,37 +388,68 @@ class OpenAlexSource(BasePaperSource):
             base_params["mailto"] = self.email
 
         # 实现分页逻辑，支持获取超过200条的结果
-        page = 1
         per_page = min(200, self.max_results)  # OpenAlex单页最大200
         total_fetched = 0
+        # 避免同一次抓取（多关键词 OR 扇出）出现重复论文
+        seen_in_run = set()
+
+        # OpenAlex 的 search 在多关键词时召回可能偏严格。
+        # OR 模式下采用“按关键词分别搜索 + 本地合并去重”提升召回，
+        # AND 模式仍使用组合查询。
+        mode = (match_mode or "OR").strip().upper()
+        keyword_terms = [(kw or "").strip() for kw in (keywords or []) if (kw or "").strip()]
+        if keyword_terms and mode == "OR":
+            search_queries = []
+            for kw in keyword_terms:
+                q = self._build_search_query([kw])
+                if q and q not in search_queries:
+                    search_queries.append(q)
+        else:
+            q = self._build_search_query(keyword_terms)
+            search_queries = [q] if q else [None]
 
         try:
-            while total_fetched < self.max_results:
-                date_filter = f"primary_location.source.issn:{issn_filter},from_publication_date:{from_date}"
-                if date_to:
-                    date_filter += f",to_publication_date:{date_to}"
-
-                params = {
-                    "filter": date_filter,
-                    "per_page": per_page,
-                    "page": page,
-                    "sort": "publication_date:desc",
-                    "select": "id,doi,title,authorships,abstract_inverted_index,publication_date,primary_location,open_access,locations,best_oa_location,ids",
-                }
-                search_query = self._build_search_query(keywords)
-                if search_query:
-                    params["search"] = search_query
-                params.update(base_params)
-
-                logger.debug(f"  正在获取第 {page} 页...")
-                data = self._api_request(url, params)
-
-                results = data.get("results", [])
-                if not results:
-                    logger.debug(f"  第 {page} 页无更多结果，停止分页")
+            pages_fetched = 0
+            for search_query in search_queries:
+                if total_fetched >= self.max_results:
                     break
 
-                for item in results:
+                page = 1
+                logger.info(
+                    f"  查询策略: {'无 search（仅期刊+时间）' if not search_query else f'search={search_query}'}"
+                )
+
+                while total_fetched < self.max_results:
+                    date_filter = (
+                        f"primary_location.source.issn:{issn_filter},from_publication_date:{from_date}"
+                    )
+                    if date_to:
+                        date_filter += f",to_publication_date:{date_to}"
+
+                    params = {
+                        "filter": date_filter,
+                        "per_page": per_page,
+                        "page": page,
+                        "sort": "publication_date:desc",
+                        "select": "id,doi,title,authorships,abstract_inverted_index,publication_date,primary_location,open_access,locations,best_oa_location,ids",
+                    }
+                    if search_query:
+                        params["search"] = search_query
+                    params.update(base_params)
+
+                    logger.debug(f"  正在获取第 {page} 页...")
+                    data = self._api_request(url, params)
+                    pages_fetched += 1
+
+                    results = data.get("results", [])
+                    if not results:
+                        logger.debug(f"  第 {page} 页无更多结果，停止分页")
+                        break
+
+                    for item in results:
+                        if total_fetched >= self.max_results:
+                            break
+
                     doi = item.get("doi")
                     if not doi:
                         # 使用 OpenAlex ID 作为后备
@@ -429,6 +460,8 @@ class OpenAlexSource(BasePaperSource):
 
                     # 去重检查
                     if self.is_processed(doi):
+                        continue
+                    if doi in seen_in_run:
                         continue
 
                     # 提取标题
@@ -550,16 +583,17 @@ class OpenAlexSource(BasePaperSource):
                         arxiv_url=arxiv_url,
                     )
                     papers.append(metadata)
+                    seen_in_run.add(doi)
                     total_fetched += 1
 
                     if total_fetched >= self.max_results:
                         break
 
-                # 检查是否还有更多页
-                page += 1
-                if total_fetched >= self.max_results:
-                    logger.debug(f"  已达到最大结果数 {self.max_results}，停止分页")
-                    break
+                    # 检查是否还有更多页
+                    page += 1
+                    if total_fetched >= self.max_results:
+                        logger.debug(f"  已达到最大结果数 {self.max_results}，停止分页")
+                        break
 
         except requests.exceptions.RequestException as e:
             logger.error(f"OpenAlex API 请求失败: {e}")
@@ -569,7 +603,7 @@ class OpenAlexSource(BasePaperSource):
             logger.error(f"OpenAlex 数据处理失败: {e}")
             traceback.print_exc()
 
-        logger.info(f"  共获取 {len(papers)} 篇论文（分 {page - 1} 页）")
+        logger.info(f"  共获取 {len(papers)} 篇论文（分 {pages_fetched} 页）")
         return papers
 
     def _rebuild_abstract(self, inverted_index: Dict[str, List[int]]) -> str:
