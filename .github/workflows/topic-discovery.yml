@@ -30,7 +30,7 @@ on:
           - ascending
           - descending
       max_results:
-        description: '最终通知的论文数（硬上限 5，留空默认 5）。脚本内候选池固定 1000，LLM 评分池固定前 100。'
+        description: '最终通知的论文数（硬上限 5，留空默认 5）。脚本内候选池固定 1000 且对全部候选 LLM 评分。'
         required: false
         default: '5'
 
@@ -151,12 +151,13 @@ jobs:
             print(f"final_top_n={final_top_n} 超过上限，自动限制为 5")
             final_top_n = 5
 
-          # 候选池：从 arxiv 拉 1000 篇（OR 匹配），覆盖硬件安全 2 年绝大多数论文（~200 天 runway）
-          # 评分池：历史过滤后仅对前 100 篇 LLM 打分，控制单次运行成本
-          # 评分结果通过 score_cache.json 缓存，稳态 LLM 调用量 ≤ 每日新增论文数
+          # 候选池：从 arxiv 拉 1000 篇（OR 匹配），覆盖硬件安全 2 年绝大多数论文
+          # 评分池：设为 None = 对全部候选 LLM 打分，确保 Top-5 从完整 2 年候选中选出，
+          #         不会遗漏正文/老论文。首次冷启动约评分 300~1000 次 cheap LLM，
+          #         之后依靠 score_cache.json 命中，稳态调用量 ≤ 每日新增论文数
           # 最终：按相关性截断到 final_top_n
           candidate_pool_size = 1000
-          score_pool_size = 100
+          score_pool_size = None
 
           categories = shlex.split(categories_input) if categories_input else ["cs.CR", "cs.AR", "cs.ET"]
 
