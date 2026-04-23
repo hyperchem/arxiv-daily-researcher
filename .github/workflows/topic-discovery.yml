@@ -128,12 +128,13 @@ jobs:
           sort_order = """${{ github.event.inputs.sort_order }}""".strip() or "descending"
           max_results_input = """${{ github.event.inputs.max_results }}""".strip()
 
+          config_path = project_root / "configs" / "config.json"
+          config = json5.loads(config_path.read_text(encoding="utf-8"))
+
           # Keywords: input 优先，未提供则读取 config.json 主关键词
           if kw_input:
             keywords = shlex.split(kw_input)
           else:
-            config_path = project_root / "configs" / "config.json"
-            config = json5.loads(config_path.read_text(encoding="utf-8"))
             keywords = config.get("keywords", {}).get("primary_keywords", {}).get("keywords", [])
 
           if not keywords:
@@ -151,15 +152,18 @@ jobs:
             print(f"final_top_n={final_top_n} 超过上限，自动限制为 5")
             final_top_n = 5
 
-          # 候选池：从 arxiv 拉 1000 篇（OR 匹配），覆盖硬件安全 2 年绝大多数论文
-          # 评分池：设为 None = 对全部候选 LLM 打分，确保 Top-5 从完整 2 年候选中选出，
+          # 候选池：多源模式下默认“每个数据源”最多拉 1000 篇（可被 max_results_per_source 覆盖）
+          # 评分池：设为 None = 对全部候选 LLM 打分，确保 Top-5 从完整时间窗候选中选出，
           #         不会遗漏正文/老论文。首次冷启动约评分 300~1000 次 cheap LLM，
           #         之后依靠 score_cache.json 命中，稳态调用量 ≤ 每日新增论文数
           # 最终：按相关性截断到 final_top_n
-          candidate_pool_size = 1000
+          per_source_default_limit = 1000
           score_pool_size = None
 
           categories = shlex.split(categories_input) if categories_input else ["cs.CR", "cs.AR", "cs.ET"]
+          enabled_sources = config.get("data_sources", {}).get("enabled", ["arxiv"])
+          journals = config.get("data_sources", {}).get("journals", [])
+          max_results_per_source = config.get("search_settings", {}).get("max_results_per_source", {})
 
           date_to = date.today()
           date_from = date_to - timedelta(days=365 * years_back)
@@ -169,7 +173,10 @@ jobs:
           print(f"Categories: {categories}")
           print(f"Sort order: {sort_order}")
           print(f"Match mode: OR")
-          print(f"Candidate pool: {candidate_pool_size}")
+          print(f"Enabled sources: {enabled_sources}")
+          print(f"Configured journals: {journals}")
+          print(f"Per-source limits: {max_results_per_source}")
+          print(f"Per-source default limit: {per_source_default_limit}")
           print(f"Score pool: {score_pool_size}")
           print(f"Final top-N: {final_top_n}")
 
@@ -179,13 +186,16 @@ jobs:
             date_from=date_from,
             date_to=date_to,
             sort_order=sort_order,
-            max_results=candidate_pool_size,
+            max_results=per_source_default_limit,
             categories=categories,
             history_dir=settings.DATA_DIR / "topic_discovery_history",
             dedupe_history=True,
             match_mode="OR",
             final_top_n=final_top_n,
             score_pool_size=score_pool_size,
+            enabled_sources=enabled_sources,
+            journals=journals,
+            max_results_per_source=max_results_per_source,
           )
           pipeline.run()
           PYEOF

@@ -117,7 +117,7 @@ class TrendAgent:
         categories_str = ", ".join(paper.categories) if paper.categories else "未分类"
         pub_date = paper.published_date.strftime("%Y-%m-%d") if paper.published_date else "未知"
 
-        prompt = f"""你是一位学术论文分析助手。请为以下 arXiv 论文生成一段简洁的中文摘要（TLDR）。
+        prompt = f"""你是一位学术论文分析助手。请为以下论文生成一段简洁的中文摘要（TLDR）。
 
 要求：
 - 用 2-3 句话概括论文的核心贡献
@@ -238,7 +238,7 @@ class TrendAgent:
         """执行单个趋势分析技能"""
         papers_json = json.dumps(papers_data, ensure_ascii=False, separators=(",", ":"))
 
-        prompt = f"""你是一位资深学术研究分析专家。以下是关键词 "{', '.join(keywords)}" 在 {date_from} ~ {date_to} 期间的 {total_count} 篇 arXiv 论文数据。
+        prompt = f"""你是一位资深学术研究分析专家。以下是关键词 "{', '.join(keywords)}" 在 {date_from} ~ {date_to} 期间的 {total_count} 篇论文数据。
 
 请根据以下技能要求进行分析：
 
@@ -254,7 +254,7 @@ class TrendAgent:
 
 重要提示：
 - 所有分析必须基于提供的论文数据，不要引用数据集以外的论文
-- 提及具体论文时请使用 arXiv ID 和标题
+- 提及具体论文时请使用论文 ID 和标题
 - 使用 Markdown 格式输出
 - 分析应有数据支撑，避免空泛论述
 - 直接输出分析结果，不要重复技能要求"""

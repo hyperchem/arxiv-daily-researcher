@@ -10,7 +10,7 @@ import logging
 import re
 import traceback
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import List, Dict, Optional
 from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_log
@@ -179,6 +179,55 @@ class OpenAlexSource(BasePaperSource):
     def can_download_pdf(self) -> bool:
         return False  # OpenAlex 只提供元数据
 
+    @staticmethod
+    def _to_date_str(value) -> Optional[str]:
+        """将 date/datetime/str 转成 YYYY-MM-DD 字符串。"""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d")
+        if isinstance(value, date):
+            return value.strftime("%Y-%m-%d")
+        if isinstance(value, str):
+            return value.strip() or None
+        return None
+
+    @staticmethod
+    def _build_search_query(keywords: Optional[List[str]]) -> str:
+        """
+        构建 OpenAlex `search` 参数字符串。
+        - 单词直接拼接
+        - 包含空格的关键词使用引号，尽量做短语匹配
+        """
+        if not keywords:
+            return ""
+        parts = []
+        for kw in keywords:
+            s = (kw or "").strip()
+            if not s:
+                continue
+            if " " in s:
+                parts.append(f'"{s}"')
+            else:
+                parts.append(s)
+        return " ".join(parts)
+
+    @staticmethod
+    def _matches_keywords(text: str, keywords: Optional[List[str]], match_mode: str = "OR") -> bool:
+        """
+        本地关键词兜底过滤，避免 API 召回过宽。
+        """
+        if not keywords:
+            return True
+        target = (text or "").lower()
+        terms = [(kw or "").strip().lower() for kw in keywords if (kw or "").strip()]
+        if not terms:
+            return True
+        mode = (match_mode or "OR").strip().upper()
+        if mode == "AND":
+            return all(term in target for term in terms)
+        return any(term in target for term in terms)
+
     def get_journal_info(self, journal_code: str) -> Optional[Dict]:
         """获取期刊信息"""
         return JOURNAL_ISSN_MAP.get(journal_code.lower())
@@ -202,7 +251,12 @@ class OpenAlexSource(BasePaperSource):
             return []
 
         all_papers = []
-        from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        from_date = self._to_date_str(kwargs.get("date_from")) or (
+            datetime.now() - timedelta(days=days)
+        ).strftime("%Y-%m-%d")
+        date_to = self._to_date_str(kwargs.get("date_to"))
+        keywords = kwargs.get("keywords") or []
+        match_mode = kwargs.get("match_mode", "OR")
 
         logger.info(f"[OpenAlex] 开始抓取期刊论文")
         logger.info(f"  目标期刊: {self.journals}")
@@ -226,6 +280,9 @@ class OpenAlexSource(BasePaperSource):
                     journal_code=journal_code,
                     journal_name=journal_name,
                     from_date=from_date,
+                    date_to=date_to,
+                    keywords=keywords,
+                    match_mode=match_mode,
                 )
                 all_papers.extend(papers)
                 logger.info(f"    {display_name}: 发现 {len(papers)} 篇新论文")
@@ -295,7 +352,14 @@ class OpenAlexSource(BasePaperSource):
             return None
 
     def _fetch_journal_papers(
-        self, issn_list: List[str], journal_code: str, journal_name: str, from_date: str
+        self,
+        issn_list: List[str],
+        journal_code: str,
+        journal_name: str,
+        from_date: str,
+        date_to: Optional[str] = None,
+        keywords: Optional[List[str]] = None,
+        match_mode: str = "OR",
     ) -> List[PaperMetadata]:
         """
         抓取单个期刊的论文。
@@ -330,13 +394,20 @@ class OpenAlexSource(BasePaperSource):
 
         try:
             while total_fetched < self.max_results:
+                date_filter = f"primary_location.source.issn:{issn_filter},from_publication_date:{from_date}"
+                if date_to:
+                    date_filter += f",to_publication_date:{date_to}"
+
                 params = {
-                    "filter": f"primary_location.source.issn:{issn_filter},from_publication_date:{from_date}",
+                    "filter": date_filter,
                     "per_page": per_page,
                     "page": page,
                     "sort": "publication_date:desc",
                     "select": "id,doi,title,authorships,abstract_inverted_index,publication_date,primary_location,open_access,locations,best_oa_location,ids",
                 }
+                search_query = self._build_search_query(keywords)
+                if search_query:
+                    params["search"] = search_query
                 params.update(base_params)
 
                 logger.debug(f"  正在获取第 {page} 页...")
@@ -388,6 +459,12 @@ class OpenAlexSource(BasePaperSource):
                         logger.warning(
                             f"    ⚠️  [{title[:30]}...] OpenAlex 未提供摘要数据 (可能因期刊版权限制)"
                         )
+
+                    # 本地关键词兜底：确保只保留命中关键词的论文
+                    if keywords:
+                        combined_text = f"{title}\n{abstract}"
+                        if not self._matches_keywords(combined_text, keywords, match_mode):
+                            continue
 
                     # 提取发布日期
                     pub_date_str = item.get("publication_date")

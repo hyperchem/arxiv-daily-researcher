@@ -2,13 +2,19 @@
   "search_settings": {
     "search_days": 3,
     "max_results": 30,
-    "max_results_per_source": {}
+    "max_results_per_source": {
+      "arxiv": 300,
+      "prl": 200
+    }
   },
   "data_sources": {
     "enabled": [
-      "arxiv"
+      "arxiv",
+      "prl"
     ],
-    "journals": [],
+    "journals": [
+      "prl"
+    ],
     "reports_by_source": true,
     "arxiv": {
       "fetch_timeout_seconds": 180

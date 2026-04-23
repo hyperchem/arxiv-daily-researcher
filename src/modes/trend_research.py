@@ -16,7 +16,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from tqdm import tqdm
 
@@ -24,6 +24,7 @@ from config import settings
 from utils.logger import setup_logger
 from utils.token_counter import token_counter
 from sources.arxiv_source import ArxivSource
+from sources.openalex_source import OpenAlexSource, JOURNAL_ISSN_MAP
 from agents.trend_agent import TrendAgent
 from report.trend.reporter import TrendReporter
 from notifications import NotifierAgent
@@ -128,6 +129,11 @@ class TrendResearchPipeline:
         match_mode: str = "AND",
         final_top_n: Optional[int] = None,
         score_pool_size: Optional[int] = None,
+        enabled_sources: Optional[List[str]] = None,
+        journals: Optional[List[str]] = None,
+        max_results_per_source: Optional[Dict[str, int]] = None,
+        openalex_email: Optional[str] = None,
+        openalex_api_key: Optional[str] = None,
     ):
         self.settings = settings
         self.keywords = keywords
@@ -148,6 +154,14 @@ class TrendResearchPipeline:
         self.score_pool_size = score_pool_size if (score_pool_size and score_pool_size > 0) else None
         # 记录最近一次重排序的 paper_id -> score 映射，供通知阶段展示 Top-N 详情
         self._last_scores: Dict[str, float] = {}
+        # topic discovery 可选复用 daily 的多源配置；默认保持 arXiv-only 兼容行为
+        self.enabled_sources = enabled_sources or ["arxiv"]
+        self.journals = journals or []
+        self.max_results_per_source = max_results_per_source or {}
+        self.openalex_email = openalex_email if openalex_email is not None else settings.OPENALEX_EMAIL
+        self.openalex_api_key = (
+            openalex_api_key if openalex_api_key is not None else settings.OPENALEX_API_KEY
+        )
 
     def run(self):
         """执行研究趋势分析完整流程"""
@@ -177,28 +191,22 @@ class TrendResearchPipeline:
                 token_counter.reset()
 
             # ==================== 阶段1: 搜索论文 ====================
-            logger.info(">>> 阶段1: 从 ArXiv 搜索论文...")
-
-            arxiv_source = ArxivSource(
-                history_dir=self.history_dir,
-                max_results=self.max_results,
-            )
+            logger.info(">>> 阶段1: 搜索候选论文...")
 
             # 启用 final_top_n 时延后标记历史：先取候选池、本地重排序后仅把最终 Top-N 写入历史，
             # 避免未入选的候选被误标记导致次日候选池枯竭。
             defer_history_mark = bool(self.dedupe_history and self.final_top_n)
 
-            papers = arxiv_source.search_by_keywords(
-                keywords=self.keywords,
-                date_from=self.date_from,
-                date_to=self.date_to,
-                sort_order=self.sort_order,
-                max_results=self.max_results,
-                categories=self.categories,
-                use_history=self.dedupe_history,
-                match_mode=self.match_mode,
-                mark_after_fetch=not defer_history_mark,
+            papers, history_sources = self._fetch_candidate_papers(defer_history_mark=defer_history_mark)
+
+            # 不延后时，按源立即标记全部候选为已处理
+            # arXiv-only 且 mark_after_fetch=True 时，ArxivSource 内部已完成历史写入，避免重复写文件
+            should_mark_in_outer = not (
+                set(history_sources.keys()) == {"arxiv"} and "openalex" not in history_sources
             )
+            if self.dedupe_history and not defer_history_mark and papers and should_mark_in_outer:
+                self._mark_papers_history(papers, history_sources)
+                logger.info(f"  已将候选 {len(papers)} 篇论文写入历史")
 
             if not papers:
                 logger.info("未搜索到任何论文。")
@@ -230,8 +238,7 @@ class TrendResearchPipeline:
             # 若此前延后了历史标记，现在只把最终入选论文写入历史，
             # 未入选候选留待下次运行重新评分
             if defer_history_mark and papers:
-                for p in papers:
-                    arxiv_source.mark_as_processed(p.paper_id)
+                self._mark_papers_history(papers, history_sources)
                 logger.info(f"  已将入选 {len(papers)} 篇论文写入历史")
 
             # ==================== 阶段2: 生成 TLDR ====================
@@ -296,7 +303,7 @@ class TrendResearchPipeline:
                     {
                         "title": p.title,
                         "score": self._last_scores.get(p.paper_id, 0.0),
-                        "source": "arxiv",
+                        "source": getattr(p, "source", "unknown"),
                         "tldr": tldrs.get(p.paper_id, "") if tldrs else "",
                         "url": getattr(p, "url", "") or "",
                     }
@@ -384,6 +391,142 @@ class TrendResearchPipeline:
         return tldrs
 
     # ==================== 相关性评分 + 截断 ====================
+
+    def _get_source_limit(self, source_name: str) -> int:
+        """
+        获取指定来源的抓取上限：
+        1) 优先使用 max_results_per_source[source_name]
+        2) 回退到 pipeline 级 max_results
+        """
+        return int(self.max_results_per_source.get(source_name, self.max_results))
+
+    def _fetch_candidate_papers(self, defer_history_mark: bool) -> Tuple[list, Dict[str, Any]]:
+        """
+        获取候选论文。
+
+        兼容两种模式：
+        - 默认 arXiv-only（保持原有 trend_research 行为）
+        - topic discovery 多源模式：按 enabled_sources 抓取 arXiv + OpenAlex 期刊
+        """
+        enabled_set = set(self.enabled_sources or ["arxiv"])
+        has_journal_in_enabled = any(s != "arxiv" and s in JOURNAL_ISSN_MAP for s in enabled_set)
+        has_explicit_journals = any(j in JOURNAL_ISSN_MAP for j in (self.journals or []))
+        use_multi_source = (
+            len(enabled_set) > 1
+            or "arxiv" not in enabled_set
+            or has_journal_in_enabled
+            or has_explicit_journals
+        )
+
+        if not use_multi_source:
+            arxiv_source = ArxivSource(
+                history_dir=self.history_dir,
+                max_results=self._get_source_limit("arxiv"),
+            )
+            papers = arxiv_source.search_by_keywords(
+                keywords=self.keywords,
+                date_from=self.date_from,
+                date_to=self.date_to,
+                sort_order=self.sort_order,
+                max_results=self._get_source_limit("arxiv"),
+                categories=self.categories,
+                use_history=self.dedupe_history,
+                match_mode=self.match_mode,
+                mark_after_fetch=not defer_history_mark,
+            )
+            return papers, {"arxiv": arxiv_source}
+
+        logger.info(f"  多源模式启用: {sorted(enabled_set)}")
+        days = max(1, (self.date_to - self.date_from).days + 1)
+        papers: List[Any] = []
+        handlers: Dict[str, Any] = {}
+
+        # 统一去重键：优先 paper_id，避免跨源重复论文
+        seen_ids = set()
+
+        def _append_papers(items: List[Any]):
+            for p in items:
+                pid = getattr(p, "paper_id", "")
+                if not pid or pid in seen_ids:
+                    continue
+                # 多源抓取统一收敛到用户指定时间窗
+                if p.published_date:
+                    if p.published_date.date() < self.date_from or p.published_date.date() > self.date_to:
+                        continue
+                seen_ids.add(pid)
+                papers.append(p)
+
+        if "arxiv" in enabled_set:
+            arxiv_source = ArxivSource(
+                history_dir=self.history_dir,
+                max_results=self._get_source_limit("arxiv"),
+            )
+            handlers["arxiv"] = arxiv_source
+            arxiv_papers = arxiv_source.search_by_keywords(
+                keywords=self.keywords,
+                date_from=self.date_from,
+                date_to=self.date_to,
+                sort_order=self.sort_order,
+                max_results=self._get_source_limit("arxiv"),
+                categories=self.categories,
+                use_history=self.dedupe_history,
+                match_mode=self.match_mode,
+                mark_after_fetch=not defer_history_mark,
+            )
+            logger.info(f"  [arxiv] 候选 {len(arxiv_papers)} 篇")
+            _append_papers(arxiv_papers)
+
+        # 期刊来源可来自 enabled_sources 和 journals 两处，做并集
+        journal_codes: List[str] = []
+        for s in self.enabled_sources:
+            if s != "arxiv" and s in JOURNAL_ISSN_MAP and s not in journal_codes:
+                journal_codes.append(s)
+        for j in self.journals:
+            if j in JOURNAL_ISSN_MAP and j not in journal_codes:
+                journal_codes.append(j)
+
+        for journal in journal_codes:
+            journal_source = OpenAlexSource(
+                history_dir=self.history_dir,
+                journals=[journal],
+                max_results=self._get_source_limit(journal),
+                email=self.openalex_email,
+                api_key=self.openalex_api_key,
+            )
+            handlers[journal] = journal_source
+            try:
+                journal_papers = journal_source.fetch_papers(
+                    days=days,
+                    journals=[journal],
+                    date_from=self.date_from,
+                    date_to=self.date_to,
+                    keywords=self.keywords,
+                    match_mode=self.match_mode,
+                )
+                logger.info(
+                    f"  [{journal}] 候选 {len(journal_papers)} 篇 (limit={self._get_source_limit(journal)})"
+                )
+                _append_papers(journal_papers)
+            finally:
+                try:
+                    journal_source.close()
+                except Exception:
+                    pass
+
+        papers.sort(
+            key=lambda p: p.published_date or datetime.min,
+            reverse=(self.sort_order == "descending"),
+        )
+        logger.info(f"  多源候选总数: {len(papers)} 篇")
+        return papers, handlers
+
+    def _mark_papers_history(self, papers: List[Any], handlers: Dict[str, Any]) -> None:
+        """按 paper.source 写入对应历史。"""
+        for p in papers:
+            source_key = "arxiv" if p.source == "arxiv" else p.source
+            handler = handlers.get(source_key)
+            if handler:
+                handler.mark_as_processed(p.paper_id)
 
     def _rerank_and_truncate(self, papers: list, top_n: int) -> list:
         """
