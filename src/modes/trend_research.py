@@ -9,12 +9,14 @@
 5. 发送通知
 """
 
+import hashlib
+import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from tqdm import tqdm
 
@@ -27,6 +29,76 @@ from report.trend.reporter import TrendReporter
 from notifications import NotifierAgent
 
 logger = setup_logger("TrendResearch")
+
+
+def _keywords_hash(keywords: List[str]) -> str:
+    """对关键词集合做规范化哈希（顺序无关、大小写无关），用于 cache 失效判定。"""
+    normalized = sorted(kw.strip().lower() for kw in keywords if kw and kw.strip())
+    joined = "\n".join(normalized)
+    return hashlib.md5(joined.encode("utf-8")).hexdigest()
+
+
+class _ScoreCache:
+    """
+    论文相关性评分本地缓存。
+
+    存储格式（JSON）:
+        {
+          "keywords_hash": "<md5>",
+          "scores": {"<paper_id>": <float>, ...}
+        }
+
+    当 keywords_hash 与当前关键词集合不一致时，整个 cache 视为失效（返回空），
+    下次写入时会覆盖旧数据。保证用户修改关键词后旧评分不会污染结果。
+    """
+
+    def __init__(self, path: Path, current_keywords_hash: str):
+        self.path = path
+        self.current_hash = current_keywords_hash
+        self.scores: Dict[str, float] = {}
+        self._loaded_hash: Optional[str] = None
+        self._lock = threading.Lock()
+
+    def load(self) -> None:
+        if not self.path.exists():
+            logger.info(f"  [cache] 评分缓存不存在，将新建: {self.path}")
+            return
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            self._loaded_hash = data.get("keywords_hash")
+            raw_scores = data.get("scores", {}) or {}
+            if self._loaded_hash == self.current_hash:
+                self.scores = {
+                    k: float(v) for k, v in raw_scores.items() if isinstance(v, (int, float))
+                }
+                logger.info(f"  [cache] 命中关键词哈希，载入 {len(self.scores)} 条评分")
+            else:
+                logger.warning(
+                    f"  [cache] 关键词哈希不匹配（old={self._loaded_hash}, new={self.current_hash}），"
+                    f"旧评分视为失效，本次重新计算"
+                )
+        except Exception as e:
+            logger.warning(f"  [cache] 读取评分缓存失败，忽略: {e}")
+
+    def get(self, paper_id: str) -> Optional[float]:
+        return self.scores.get(paper_id)
+
+    def set(self, paper_id: str, score: float) -> None:
+        with self._lock:
+            self.scores[paper_id] = float(score)
+
+    def save(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            data = {"keywords_hash": self.current_hash, "scores": self.scores}
+            tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+            tmp_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            tmp_path.replace(self.path)
+            logger.info(f"  [cache] 评分缓存已写入（共 {len(self.scores)} 条）: {self.path}")
+        except Exception as e:
+            logger.warning(f"  [cache] 写入评分缓存失败: {e}")
 
 
 class TrendResearchPipeline:
@@ -51,6 +123,11 @@ class TrendResearchPipeline:
         sort_order: str = "ascending",
         max_results: int = 500,
         categories: List[str] = None,
+        history_dir: Optional[Path] = None,
+        dedupe_history: bool = False,
+        match_mode: str = "AND",
+        final_top_n: Optional[int] = None,
+        score_pool_size: Optional[int] = None,
     ):
         self.settings = settings
         self.keywords = keywords
@@ -59,6 +136,16 @@ class TrendResearchPipeline:
         self.sort_order = sort_order
         self.max_results = max_results
         self.categories = categories or []
+        self.history_dir = history_dir or self.settings.HISTORY_DIR
+        self.dedupe_history = dedupe_history
+        self.match_mode = (match_mode or "AND").strip().upper()
+        if self.match_mode not in {"AND", "OR"}:
+            self.match_mode = "AND"
+        # 当 final_top_n 设置且候选多于该值时，按关键词相关性本地评分后截断到 final_top_n
+        self.final_top_n = final_top_n if (final_top_n and final_top_n > 0) else None
+        # 打分候选池上限：历史过滤后若仍超过该值，只对前 N 篇（按时间倒序）做 LLM 打分，
+        # 用于控制单次运行的 LLM 调用成本。None 表示不做二次截断。
+        self.score_pool_size = score_pool_size if (score_pool_size and score_pool_size > 0) else None
 
     def run(self):
         """执行研究趋势分析完整流程"""
@@ -75,6 +162,13 @@ class TrendResearchPipeline:
             logger.info(f"  最大结果数: {self.max_results}")
             if self.categories:
                 logger.info(f"  ArXiv 分类: {self.categories}")
+            logger.info(
+                f"  历史去重: {'开启' if self.dedupe_history else '关闭'} "
+                f"(history_dir={self.history_dir})"
+            )
+            logger.info(f"  关键词匹配模式: {self.match_mode}")
+            if self.final_top_n:
+                logger.info(f"  候选池→相关性截断 Top-N: {self.final_top_n}")
             logger.info("=" * 80)
 
             if settings.TOKEN_TRACKING_ENABLED:
@@ -84,9 +178,13 @@ class TrendResearchPipeline:
             logger.info(">>> 阶段1: 从 ArXiv 搜索论文...")
 
             arxiv_source = ArxivSource(
-                history_dir=self.settings.HISTORY_DIR,
+                history_dir=self.history_dir,
                 max_results=self.max_results,
             )
+
+            # 启用 final_top_n 时延后标记历史：先取候选池、本地重排序后仅把最终 Top-N 写入历史，
+            # 避免未入选的候选被误标记导致次日候选池枯竭。
+            defer_history_mark = bool(self.dedupe_history and self.final_top_n)
 
             papers = arxiv_source.search_by_keywords(
                 keywords=self.keywords,
@@ -95,6 +193,9 @@ class TrendResearchPipeline:
                 sort_order=self.sort_order,
                 max_results=self.max_results,
                 categories=self.categories,
+                use_history=self.dedupe_history,
+                match_mode=self.match_mode,
+                mark_after_fetch=not defer_history_mark,
             )
 
             if not papers:
@@ -105,6 +206,31 @@ class TrendResearchPipeline:
 
             logger.info(f"搜索到 {len(papers)} 篇论文")
             print(f"  搜索到 {len(papers)} 篇论文")
+
+            # ==================== 阶段1.5（可选）: 本地相关性评分 + 截断 Top-N ====================
+            # 用于 topic-discovery：候选池较大时按关键词相关性打分排序，仅保留 Top-N 进入后续处理
+            if self.final_top_n and len(papers) > self.final_top_n:
+                # 打分前先按 score_pool_size 控制单次 LLM 调用量（保留最前面的 N 篇）
+                if self.score_pool_size and len(papers) > self.score_pool_size:
+                    logger.info(
+                        f">>> 阶段1.5a: 打分前按 score_pool_size={self.score_pool_size} 截断"
+                        f"（{len(papers)} → {self.score_pool_size}）"
+                    )
+                    papers = papers[: self.score_pool_size]
+
+                logger.info(
+                    f">>> 阶段1.5: 本地相关性评分（{len(papers)} 候选 → Top {self.final_top_n}）..."
+                )
+                papers = self._rerank_and_truncate(papers, self.final_top_n)
+                logger.info(f"  截断后保留 {len(papers)} 篇论文")
+                print(f"  按相关性截断至 {len(papers)} 篇")
+
+            # 若此前延后了历史标记，现在只把最终入选论文写入历史，
+            # 未入选候选留待下次运行重新评分
+            if defer_history_mark and papers:
+                for p in papers:
+                    arxiv_source.mark_as_processed(p.paper_id)
+                logger.info(f"  已将入选 {len(papers)} 篇论文写入历史")
 
             # ==================== 阶段2: 生成 TLDR ====================
             tldrs: Dict[str, str] = {}
@@ -237,6 +363,113 @@ class TrendResearchPipeline:
                         logger.error(f"TLDR 生成异常 ({paper.title[:30]}...): {e}")
                     pbar.update(1)
         return tldrs
+
+    # ==================== 相关性评分 + 截断 ====================
+
+    def _rerank_and_truncate(self, papers: list, top_n: int) -> list:
+        """
+        使用 AnalysisAgent 对候选论文按关键词加权评分并截断到 Top-N。
+
+        评分结果通过本地 JSON 缓存（score_cache.json）持久化，按 paper_id 索引：
+        - 命中缓存的论文跳过 LLM 调用；
+        - 仅对新论文调用 cheap LLM 打分，打完合并写回缓存。
+        关键词集合变更时（keywords_hash 不匹配）旧缓存整体失效。
+
+        关键词权重取自 settings.PRIMARY_KEYWORD_WEIGHT（与 daily_research 打分口径一致）；
+        评分失败的论文按 0 分处理，不影响整体排序。
+        """
+        from agents import AnalysisAgent
+
+        try:
+            weight = float(getattr(self.settings, "PRIMARY_KEYWORD_WEIGHT", 1.0) or 1.0)
+        except Exception:
+            weight = 1.0
+        keywords_dict = {kw: weight for kw in self.keywords}
+
+        # 加载评分缓存
+        cache = _ScoreCache(
+            path=self.history_dir / "score_cache.json",
+            current_keywords_hash=_keywords_hash(self.keywords),
+        )
+        cache.load()
+
+        # 拆分命中 / 未命中
+        hits: List[tuple] = []
+        misses: list = []
+        for paper in papers:
+            cached = cache.get(paper.paper_id)
+            if cached is not None:
+                hits.append((paper, cached))
+            else:
+                misses.append(paper)
+
+        logger.info(
+            f"  [cache] 评分缓存命中: {len(hits)}/{len(papers)}，"
+            f"需要 LLM 打分: {len(misses)} 篇"
+        )
+
+        agent = AnalysisAgent() if misses else None
+        # (paper, score_or_None)：score 为 None 表示本次 LLM 失败，不应写入缓存
+        new_scored: List[tuple] = []
+
+        def _score_one(paper):
+            try:
+                resp = agent.score_paper_with_keywords(
+                    title=paper.title,
+                    authors=paper.get_authors_string(),
+                    abstract=paper.abstract or "",
+                    keywords_dict=keywords_dict,
+                )
+                return paper, float(getattr(resp, "total_score", 0.0) or 0.0)
+            except Exception as e:
+                logger.warning(f"  相关性评分失败 ({paper.title[:30]}...): {e}")
+                # 返回 None 表示失败；不会写入缓存，下次运行会重试
+                return paper, None
+
+        if misses:
+            if self.settings.ENABLE_CONCURRENCY and len(misses) > 1:
+                workers = min(self.settings.CONCURRENCY_WORKERS, len(misses))
+                logger.info(f"  使用并发模式 (workers={workers})")
+                with tqdm(total=len(misses), desc="🎯 相关性评分", unit="篇", ncols=100) as pbar:
+                    with ThreadPoolExecutor(max_workers=workers) as executor:
+                        futures = [executor.submit(_score_one, p) for p in misses]
+                        for future in as_completed(futures):
+                            try:
+                                new_scored.append(future.result())
+                            except Exception as e:
+                                logger.warning(f"  评分任务异常: {e}")
+                            pbar.update(1)
+            else:
+                with tqdm(total=len(misses), desc="🎯 相关性评分", unit="篇", ncols=100) as pbar:
+                    for paper in misses:
+                        new_scored.append(_score_one(paper))
+                        pbar.update(1)
+
+            # 只把成功评分写入缓存并持久化；失败（score=None）跳过，下次重试
+            success_count = 0
+            fail_count = 0
+            for paper, score in new_scored:
+                if score is None:
+                    fail_count += 1
+                    continue
+                cache.set(paper.paper_id, score)
+                success_count += 1
+            if fail_count:
+                logger.warning(
+                    f"  [cache] 本次评分失败 {fail_count} 篇，未写入缓存（下次会重试）"
+                )
+            if success_count:
+                cache.save()
+
+        # 合并缓存命中 + 本次新评分（失败的 None 视为 0 分参与本次排序，但不进缓存）
+        merged: List[tuple] = list(hits)
+        for paper, score in new_scored:
+            merged.append((paper, score if score is not None else 0.0))
+        merged.sort(key=lambda x: x[1], reverse=True)
+        for paper, score in merged[:top_n]:
+            logger.info(f"    ✓ 相关性 {score:.1f}  {paper.title[:60]}")
+
+        return [p for p, _ in merged[:top_n]]
 
     # ==================== 通知 ====================
 

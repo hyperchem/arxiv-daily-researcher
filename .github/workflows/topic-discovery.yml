@@ -1,0 +1,222 @@
+name: ArXiv Topic Discovery
+
+on:
+  # 每天 UTC 00:30 运行（避开整点高峰，降低 schedule 延迟概率）
+  schedule:
+    - cron: '30 0 * * *'
+
+  workflow_dispatch:
+    inputs:
+      keywords:
+        description: |
+          可选。手动覆盖关键词，空格分隔多个词；包含空格请用引号。
+          为空时自动使用 configs/config.json 中的 primary_keywords。
+        required: false
+        default: ''
+      years_back:
+        description: '回溯年数（默认 2 年）'
+        required: false
+        default: '2'
+      categories:
+        description: 'ArXiv 分类过滤，空格分隔（默认：cs.CR cs.AR cs.ET）'
+        required: false
+        default: 'cs.CR cs.AR cs.ET'
+      sort_order:
+        description: '论文时间排序方向'
+        required: false
+        default: 'descending'
+        type: choice
+        options:
+          - ascending
+          - descending
+      max_results:
+        description: '最终通知的论文数（硬上限 5，留空默认 5）。脚本内候选池固定 1000，LLM 评分池固定前 100。'
+        required: false
+        default: '5'
+
+permissions:
+  contents: write
+
+# 防止并发 run 同时向仓库提交 data/topic_discovery_history，避免 git push 竞争。
+# cancel-in-progress: false → 新 run 会排队等待前一个完成（而非取消它），
+# 保护正在进行中的 LLM 调用不被打断，避免 token 浪费。
+concurrency:
+  group: topic-discovery-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  topic-discovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # persist-credentials 默认 true，显式写出便于阅读；后续步骤需要用 token 推送
+          persist-credentials: true
+          # fetch-depth: 0 拉取完整 git 历史，避免 shallow clone 下
+          # `git pull --rebase` 在远端有并发 commit 时失败
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env from secrets
+        run: |
+          cat > .env << 'ENVEOF'
+          CHEAP_LLM__API_KEY=${{ secrets.CHEAP_LLM_API_KEY }}
+          CHEAP_LLM__BASE_URL=${{ secrets.CHEAP_LLM_BASE_URL }}
+          CHEAP_LLM__MODEL_NAME=${{ secrets.CHEAP_LLM_MODEL_NAME }}
+          CHEAP_LLM__TEMPERATURE=${{ secrets.CHEAP_LLM_TEMPERATURE }}
+          SMART_LLM__API_KEY=${{ secrets.SMART_LLM_API_KEY }}
+          SMART_LLM__BASE_URL=${{ secrets.SMART_LLM_BASE_URL }}
+          SMART_LLM__MODEL_NAME=${{ secrets.SMART_LLM_MODEL_NAME }}
+          SMART_LLM__TEMPERATURE=${{ secrets.SMART_LLM_TEMPERATURE }}
+          OPENALEX_EMAIL=${{ secrets.OPENALEX_EMAIL }}
+          OPENALEX_API_KEY=${{ secrets.OPENALEX_API_KEY }}
+          SEMANTIC_SCHOLAR_API_KEY=${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
+          ENABLE_NOTIFICATIONS=${{ secrets.ENABLE_NOTIFICATIONS || 'false' }}
+          SMTP_HOST=${{ secrets.SMTP_HOST }}
+          SMTP_PORT=${{ secrets.SMTP_PORT || '587' }}
+          SMTP_USER=${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM=${{ secrets.SMTP_FROM }}
+          SMTP_TO=${{ secrets.SMTP_TO }}
+          WECHAT_WEBHOOK_URL=${{ secrets.WECHAT_WEBHOOK_URL }}
+          DINGTALK_WEBHOOK_URL=${{ secrets.DINGTALK_WEBHOOK_URL }}
+          DINGTALK_SECRET=${{ secrets.DINGTALK_SECRET }}
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
+          SLACK_WEBHOOK_URL=${{ secrets.SLACK_WEBHOOK_URL }}
+          GENERIC_WEBHOOK_URL=${{ secrets.GENERIC_WEBHOOK_URL }}
+          ENVEOF
+
+      - name: Create data directories
+        run: |
+          mkdir -p data/reports/trend_research/markdown \
+                   data/reports/trend_research/html \
+                   data/topic_discovery_history data/keywords data/run logs
+
+      - name: Run topic discovery pipeline
+        run: |
+          python - << 'PYEOF'
+          import shlex
+          import json5
+          import sys
+          from datetime import date, timedelta
+          from pathlib import Path
+
+          project_root = Path(".").resolve()
+          sys.path.insert(0, str(project_root / "src"))
+
+          from config import settings
+          from modes.trend_research import TrendResearchPipeline
+
+          settings.ensure_directories()
+
+          # Inputs
+          kw_input = """${{ github.event.inputs.keywords }}""".strip()
+          years_back_input = """${{ github.event.inputs.years_back }}""".strip()
+          categories_input = """${{ github.event.inputs.categories }}""".strip()
+          sort_order = """${{ github.event.inputs.sort_order }}""".strip() or "descending"
+          max_results_input = """${{ github.event.inputs.max_results }}""".strip()
+
+          # Keywords: input 优先，未提供则读取 config.json 主关键词
+          if kw_input:
+            keywords = shlex.split(kw_input)
+          else:
+            config_path = project_root / "configs" / "config.json"
+            config = json5.loads(config_path.read_text(encoding="utf-8"))
+            keywords = config.get("keywords", {}).get("primary_keywords", {}).get("keywords", [])
+
+          if not keywords:
+            print("错误: 关键词为空。请在 workflow input 提供 keywords，或在 configs/config.json 中配置 primary_keywords。")
+            sys.exit(1)
+
+          years_back = int(years_back_input) if years_back_input else 2
+          if years_back <= 0:
+            years_back = 2
+
+          final_top_n = int(max_results_input) if max_results_input else 5
+          if final_top_n <= 0:
+            final_top_n = 5
+          if final_top_n > 5:
+            print(f"final_top_n={final_top_n} 超过上限，自动限制为 5")
+            final_top_n = 5
+
+          # 候选池：从 arxiv 拉 1000 篇（OR 匹配），覆盖硬件安全 2 年绝大多数论文（~200 天 runway）
+          # 评分池：历史过滤后仅对前 100 篇 LLM 打分，控制单次运行成本
+          # 评分结果通过 score_cache.json 缓存，稳态 LLM 调用量 ≤ 每日新增论文数
+          # 最终：按相关性截断到 final_top_n
+          candidate_pool_size = 1000
+          score_pool_size = 100
+
+          categories = shlex.split(categories_input) if categories_input else ["cs.CR", "cs.AR", "cs.ET"]
+
+          date_to = date.today()
+          date_from = date_to - timedelta(days=365 * years_back)
+
+          print(f"Keywords: {keywords}")
+          print(f"Date range: {date_from} ~ {date_to}")
+          print(f"Categories: {categories}")
+          print(f"Sort order: {sort_order}")
+          print(f"Match mode: OR")
+          print(f"Candidate pool: {candidate_pool_size}")
+          print(f"Score pool: {score_pool_size}")
+          print(f"Final top-N: {final_top_n}")
+
+          pipeline = TrendResearchPipeline(
+            settings=settings,
+            keywords=keywords,
+            date_from=date_from,
+            date_to=date_to,
+            sort_order=sort_order,
+            max_results=candidate_pool_size,
+            categories=categories,
+            history_dir=settings.DATA_DIR / "topic_discovery_history",
+            dedupe_history=True,
+            match_mode="OR",
+            final_top_n=final_top_n,
+            score_pool_size=score_pool_size,
+          )
+          pipeline.run()
+          PYEOF
+        env:
+          PYTHONUNBUFFERED: "1"
+
+      - name: Upload reports and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: topic-discovery-${{ github.run_number }}
+          path: |
+            data/reports/trend_research/
+            logs/
+            data/topic_discovery_history/
+          retention-days: 30
+
+      # 将历史 JSON + 评分缓存提交回仓库，作为唯一的持久化层。
+      # 历史文件体积小（每天新增 ≤5 条 paper_id + 评分缓存 ≤100KB），适合 git 版本化。
+      - name: Commit topic discovery history to repo
+        if: success()
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # 仅当 .gitignore 例外放行后本步骤才会看到变更
+          git add -f data/topic_discovery_history || true
+          if git diff --cached --quiet; then
+            echo "No history changes to commit."
+          else
+            git commit -m "chore(topic-discovery): update history [skip ci]"
+            # 使用 rebase 避免与并发 commit 冲突；失败则重试一次
+            git pull --rebase origin "${GITHUB_REF_NAME}" || true
+            git push origin HEAD:"${GITHUB_REF_NAME}" || (sleep 3 && git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin HEAD:"${GITHUB_REF_NAME}")
+          fi

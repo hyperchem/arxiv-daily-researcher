@@ -86,7 +86,7 @@ jobs:
         run: |
           mkdir -p data/reports/trend_research/markdown \
                    data/reports/trend_research/html \
-                   data/history data/keywords data/run logs
+                   data/daily_run_history data/keywords data/run logs
 
       - name: Run trend research
         run: |

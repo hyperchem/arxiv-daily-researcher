@@ -259,14 +259,17 @@ class ArxivSource(BasePaperSource):
         sort_order: str = "ascending",
         max_results: int = 500,
         categories: Optional[List[str]] = None,
+        use_history: bool = False,
+        match_mode: str = "AND",
+        mark_after_fetch: bool = True,
     ) -> List[PaperMetadata]:
         """
         按关键词和时间范围搜索 ArXiv 论文（研究趋势模式专用）。
 
-        使用 all: 字段搜索（标题+摘要+全文），多个关键词用 AND 连接。
+        使用 all: 字段搜索（标题+摘要+全文），多个关键词的连接方式由 match_mode 决定。
         时间范围通过 submittedDate:[YYYYMMDD TO YYYYMMDD] 过滤。
         可选地通过 cat: 限制搜索分类，多个分类用 OR 连接。
-        不查询历史记录，不去重，每次独立执行。
+        默认不查询历史记录；当 use_history=True 时，会跳过历史已处理论文并在本次完成后写入历史。
 
         参数:
             keywords: 搜索关键词列表
@@ -275,11 +278,22 @@ class ArxivSource(BasePaperSource):
             sort_order: 排序方向，"ascending"(旧→新) 或 "descending"(新→旧)
             max_results: 最大结果数（0 = 不限制）
             categories: ArXiv 分类列表，如 ["quant-ph", "cond-mat"]；空列表则不限制分类
+            use_history: 是否启用历史去重（跳过历史已处理论文）
+            match_mode: 多关键词连接方式，"AND"（严格匹配全部关键词，默认）或 "OR"（命中任一关键词即可）
+            mark_after_fetch: 是否在本次返回后自动将所有论文写入历史。仅当 use_history=True 时生效。
+                默认 True 保持向后兼容；当调用方需要先做本地重排序再仅标记最终入选论文时，
+                应显式传 False，并在筛选后自行调用 mark_as_processed。
 
         返回:
             按发表时间排序的论文列表
         """
-        # 构建查询：多个关键词用 AND 连接，每个关键词用 all: 搜索
+        # 构建查询：多个关键词按 match_mode 连接，每个关键词用 all: 搜索
+        mode = (match_mode or "AND").strip().upper()
+        if mode not in {"AND", "OR"}:
+            logger.warning(f"[ArXiv] 未知 match_mode={match_mode}，回退为 AND")
+            mode = "AND"
+        joiner = f" {mode} "
+
         keyword_parts = []
         for kw in keywords:
             # 如果关键词包含空格，用引号包裹做短语匹配
@@ -287,7 +301,10 @@ class ArxivSource(BasePaperSource):
                 keyword_parts.append(f'all:"{kw}"')
             else:
                 keyword_parts.append(f"all:{kw}")
-        keyword_query = " AND ".join(keyword_parts)
+        keyword_query = joiner.join(keyword_parts)
+        if mode == "OR" and len(keyword_parts) > 1:
+            # OR 连接时用括号包裹，确保与后续 AND 分类/时间过滤的优先级正确
+            keyword_query = f"({keyword_query})"
 
         # 分类过滤（可选）：多个分类用 OR 连接
         if categories:
@@ -336,6 +353,8 @@ class ArxivSource(BasePaperSource):
                 with _timeout_guard(fetch_timeout_seconds):
                     for result in self.client.results(search):
                         paper_id = result.get_short_id()
+                        if use_history and self.is_processed(paper_id):
+                            continue
 
                         metadata = PaperMetadata(
                             paper_id=paper_id,
@@ -350,6 +369,10 @@ class ArxivSource(BasePaperSource):
                             categories=list(result.categories) if result.categories else [],
                         )
                         papers.append(metadata)
+
+                if use_history and mark_after_fetch and papers:
+                    for p in papers:
+                        self.mark_as_processed(p.paper_id)
 
                 logger.info(f"[ArXiv] 关键词搜索完成: 共 {len(papers)} 篇论文")
                 break

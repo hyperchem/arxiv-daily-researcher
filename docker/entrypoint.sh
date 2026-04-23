@@ -23,7 +23,7 @@ mkdir -p /app/data/reports/daily_research/markdown \
          /app/data/reports/trend_research/html \
          /app/data/reports/keyword_trend/markdown \
          /app/data/reports/keyword_trend/html \
-         /app/data/history \
+         /app/data/daily_run_history \
          /app/data/reference_pdfs /app/data/downloaded_pdfs \
          /app/logs
 

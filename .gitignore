@@ -22,7 +22,11 @@ logs/
 *.log
 
 # Data (runtime generated)
-data/
+# 使用 data/* 而非 data/，以便后续 ! 例外可以重新包含子目录
+data/*
+# 例外：topic-discovery 历史需要持久化，由 workflow 提交回仓库
+!data/topic_discovery_history/
+!data/topic_discovery_history/**
 
 # Database
 *.db-journal

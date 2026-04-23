@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     ENABLED_SOURCES: List[str] = ["arxiv"]  # 启用的数据源列表
     TARGET_JOURNALS: List[str] = []  # 目标期刊列表（如 ["prl", "pra"]）
     REPORTS_BY_SOURCE: bool = True  # 是否按数据源分目录存放报告
-    HISTORY_DIR: Path = DATA_DIR / "history"  # 历史记录目录
+    HISTORY_DIR: Path = DATA_DIR / "daily_run_history"  # daily-run 历史记录目录
 
     # OpenAlex 配置
     OPENALEX_EMAIL: str = ""  # OpenAlex 礼貌池邮箱（可选，提高速率限制）

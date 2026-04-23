@@ -64,15 +64,17 @@ jobs:
           GENERIC_WEBHOOK_URL=${{ secrets.GENERIC_WEBHOOK_URL }}
           ENVEOF
 
+      # 使用 v2 cache key 前缀切断对重命名前旧 cache (data/history/) 的 restore-keys 匹配，
+      # 首次运行会冷启动（重新拉取近期论文），之后稳定在新路径 data/daily_run_history/ 上。
       - name: Restore previous data
         uses: actions/cache@v4
         with:
           path: |
-            data/history/
+            data/daily_run_history/
             data/keywords/
-          key: research-data-${{ github.run_number }}
+          key: research-data-v2-${{ github.run_number }}
           restore-keys: |
-            research-data-
+            research-data-v2-
 
       - name: Create data directories
         run: |
@@ -82,7 +84,7 @@ jobs:
                    data/reports/trend_research/html \
                    data/reports/keyword_trend/markdown \
                    data/reports/keyword_trend/html \
-                   data/history data/keywords data/run \
+                   data/daily_run_history data/keywords data/run \
                    data/reference_pdfs data/downloaded_pdfs logs
 
       - name: Debug runner time
@@ -114,6 +116,6 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: |
-            data/history/
+            data/daily_run_history/
             data/keywords/
-          key: research-data-${{ github.run_number }}
+          key: research-data-v2-${{ github.run_number }}

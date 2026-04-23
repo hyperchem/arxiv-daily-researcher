@@ -107,6 +107,11 @@ def _load_email_template(name: str) -> Optional[str]:
     if not path.exists():
         logger.debug(f"HTML 邮件模板不存在: {path}")
         return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"加载 HTML 邮件模板失败 ({path}): {e}")
+        return None
 
 
 def _normalize_text_for_telegram(text: str) -> str:
@@ -136,11 +141,26 @@ def _normalize_text_for_telegram(text: str) -> str:
     # 收敛空行
     normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
     return normalized
-    try:
-        return path.read_text(encoding="utf-8")
-    except Exception as e:
-        logger.warning(f"加载 HTML 邮件模板失败 ({path}): {e}")
-        return None
+
+
+def _strip_report_path_lines_for_telegram(text: str) -> str:
+    """移除 Telegram 中无意义的 runner 本地报告路径信息。"""
+    if not text:
+        return ""
+
+    cleaned_lines = []
+    for line in text.splitlines():
+        s = line.strip()
+        # 去掉报告路径标题与 CI runner 本地绝对路径行
+        if s in {"报告路径", "Reports", "报告文件"}:
+            continue
+        if "/home/runner/work/" in s or "\\runner\\work\\" in s:
+            continue
+        cleaned_lines.append(line)
+
+    cleaned = "\n".join(cleaned_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
 
 
 @dataclass
@@ -319,6 +339,7 @@ class WebhookNotifier(BaseNotifier):
         """Telegram Bot"""
         chat_id = self.extra.get("chat_id", "")
         text = _normalize_text_for_telegram(f"{subject}\n\n{body}")
+        text = _strip_report_path_lines_for_telegram(text)
         # Telegram 消息限 4096 字符
         if len(text) > 4000:
             text = text[:3900] + "\n\n...(内容已截断)"

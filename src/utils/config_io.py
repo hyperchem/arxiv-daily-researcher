@@ -442,7 +442,7 @@ def build_config_dict(
             "reference_pdfs": "data/reference_pdfs",
             "reports": "data/reports",
             "downloaded_pdfs": "data/downloaded_pdfs",
-            "history_dir": "data/history",
+            "history_dir": "data/daily_run_history",
         },
         "keyword_tracker": {
             "enabled": keyword_tracker_enabled,
