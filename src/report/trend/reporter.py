@@ -9,6 +9,7 @@
 - 报告存储于 trend_research/{markdown|html}/{keyword_slug}/{date_range}.{ext}
 """
 
+import hashlib
 import html
 import json
 import logging
@@ -20,13 +21,30 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+# 单个文件名/目录名的字节上限（Linux ext4 为 255，给自己留余量取 100）
+_SLUG_MAX_LEN = 100
+
 
 def _keyword_slug(keywords: List[str]) -> str:
-    """将关键词列表转为目录名：空格→连字符，逗号分隔，小写"""
-    parts = []
-    for kw in keywords:
-        parts.append(kw.strip().lower().replace(" ", "-"))
-    return "_".join(parts)
+    """
+    将关键词列表转为目录名：空格→连字符，下划线分隔，小写。
+
+    当拼接后超过 _SLUG_MAX_LEN 字节时，退化为
+    "<第一个关键词>_plus_<剩余数量>_more_<8位md5>"，
+    既保留可读性又避免触发文件系统 255 字节上限。
+    """
+    if not keywords:
+        return "keywords"
+
+    parts = [kw.strip().lower().replace(" ", "-") for kw in keywords if kw.strip()]
+    full = "_".join(parts)
+    if len(full.encode("utf-8")) <= _SLUG_MAX_LEN:
+        return full
+
+    digest = hashlib.md5(full.encode("utf-8")).hexdigest()[:8]
+    head = parts[0][:40] if parts else "keywords"
+    suffix = f"_plus_{len(parts) - 1}_more_{digest}" if len(parts) > 1 else f"_{digest}"
+    return f"{head}{suffix}"
 
 
 class TrendReporter:
