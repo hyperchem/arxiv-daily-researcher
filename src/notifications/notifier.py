@@ -21,6 +21,8 @@ import hashlib
 import hmac
 import base64
 import time
+import re
+import html
 import urllib.parse
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -105,6 +107,35 @@ def _load_email_template(name: str) -> Optional[str]:
     if not path.exists():
         logger.debug(f"HTML 邮件模板不存在: {path}")
         return None
+
+
+def _normalize_text_for_telegram(text: str) -> str:
+    """将混合 HTML/Markdown 文本规范化为 Telegram 纯文本。"""
+    if not text:
+        return ""
+
+    normalized = text
+
+    # 先处理常见 HTML 结构换行
+    normalized = re.sub(r"<br\s*/?>", "\n", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"</p\s*>", "\n\n", normalized, flags=re.IGNORECASE)
+
+    # Markdown 链接转换为纯文本
+    normalized = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1: \2", normalized)
+
+    # 去除 HTML 标签
+    normalized = re.sub(r"<[^>]+>", "", normalized)
+
+    # 去除常见 Markdown 标记
+    normalized = re.sub(r"[*_`~]", "", normalized)
+    normalized = re.sub(r"^>\s?", "", normalized, flags=re.MULTILINE)
+
+    # 反转义 HTML 实体
+    normalized = html.unescape(normalized)
+
+    # 收敛空行
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
+    return normalized
     try:
         return path.read_text(encoding="utf-8")
     except Exception as e:
@@ -287,11 +318,11 @@ class WebhookNotifier(BaseNotifier):
     def _format_telegram(self, subject: str, body: str):
         """Telegram Bot"""
         chat_id = self.extra.get("chat_id", "")
-        text = f"*{subject}*\n\n{body}"
+        text = _normalize_text_for_telegram(f"{subject}\n\n{body}")
         # Telegram 消息限 4096 字符
         if len(text) > 4000:
             text = text[:3900] + "\n\n...(内容已截断)"
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+        payload = {"chat_id": chat_id, "text": text}
         return self.webhook_url, payload, {"Content-Type": "application/json"}
 
     def _format_slack(self, subject: str, body: str):
