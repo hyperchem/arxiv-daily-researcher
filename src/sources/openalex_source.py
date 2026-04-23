@@ -493,11 +493,16 @@ class OpenAlexSource(BasePaperSource):
                             f"    ⚠️  [{title[:30]}...] OpenAlex 未提供摘要数据 (可能因期刊版权限制)"
                         )
 
-                    # 本地关键词兜底：确保只保留命中关键词的论文
+                    # 本地关键词兜底：
+                    # - AND 模式：继续本地严格过滤，确保语义一致
+                    # - OR 模式：若已使用 OpenAlex search（逐关键词查询），信任 API 召回，避免过度过滤导致 0 结果
+                    # - OR 模式且无 search（兜底路径）：才使用本地过滤
                     if keywords:
-                        combined_text = f"{title}\n{abstract}"
-                        if not self._matches_keywords(combined_text, keywords, match_mode):
-                            continue
+                        need_local_filter = mode == "AND" or not search_query
+                        if need_local_filter:
+                            combined_text = f"{title}\n{abstract}"
+                            if not self._matches_keywords(combined_text, keywords, match_mode):
+                                continue
 
                     # 提取发布日期
                     pub_date_str = item.get("publication_date")
