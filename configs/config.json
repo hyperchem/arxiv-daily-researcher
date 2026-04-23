@@ -34,18 +34,9 @@
     "primary_keywords": {
       "weight": 1.0,
       "keywords": [
-        "hardware trojan detection",
-        "side-channel attack",
-        "differential power analysis",
-        "electromagnetic analysis",
-        "fault injection",
-        "electromagnetic fault injection",
-        "laser fault injection",
-        "differential fault analysis",
-        "physical unclonable function",
+        "hardware security",
         "logic locking",
-        "hardware obfuscation",
-        "IC camouflaging"
+        "physical unclonable function"
       ]
     },
     "enable_reference_extraction": false,
